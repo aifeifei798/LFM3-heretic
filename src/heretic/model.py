@@ -126,6 +126,15 @@ class Model:
         if settings.model_commit is not None:
             self.revision_kwargs["revision"] = settings.model_commit
 
+        # Some architectures (e.g. LFM3-VL) are not natively supported by
+        # Transformers and ship their own modeling code. Executing that code
+        # requires explicit approval, which is requested interactively by
+        # Transformers unless the trust_remote_code setting is enabled.
+        self.trusted_models = {settings.model} if settings.trust_remote_code else set()
+        self.trust_kwargs: dict[str, Any] = (
+            {"trust_remote_code": True} if self.trusted_models else {}
+        )
+
         print()
         print(f"Loading model [bold]{settings.model}[/]...")
 
@@ -136,6 +145,7 @@ class Model:
             AutoTokenizer.from_pretrained(
                 settings.model,
                 **self.revision_kwargs,
+                **self.trust_kwargs,
             ),
         )
 
@@ -145,6 +155,7 @@ class Model:
             self.processor = AutoProcessor.from_pretrained(
                 settings.model,
                 **self.revision_kwargs,
+                **self.trust_kwargs,
             )
 
         # Fallback for tokenizers that don't declare a special pad token.
@@ -167,8 +178,6 @@ class Model:
             if settings.max_memory
             else None
         )
-
-        self.trusted_models = set()
 
         for dtype in settings.dtypes:
             print(f"* Trying dtype [bold]{dtype}[/]...")

@@ -198,6 +198,16 @@ class Settings(BaseSettings):
         description="Hugging Face commit hash of the model.",
     )
 
+    trust_remote_code: bool = Field(
+        default=False,
+        description=(
+            "Whether to execute custom model code. Required for models whose architecture "
+            "is not natively supported by Transformers (e.g. LFM3-VL), which ship their "
+            "own modeling files. Equivalent to answering the interactive prompt that "
+            "Transformers shows otherwise, but keeps runs non-interactive and reproducible."
+        ),
+    )
+
     evaluate_model: str | None = Field(
         default=None,
         description=(

@@ -27,6 +27,12 @@ device_map = "auto"
 # Maximum memory to allocate per device.
 # max_memory = { "0" = "20GB", "cpu" = "64GB" }
 
+# Whether to execute custom model code. Required for models whose architecture
+# is not natively supported by Transformers and which therefore ship their own
+# modeling files (e.g. LFM3-VL). When disabled, Transformers asks interactively
+# before running such code; enabling this keeps runs non-interactive.
+trust_remote_code = false
+
 # Whether to move intermediate analysis tensors (such as residuals and logprobs)
 # to CPU memory as soon as possible to reduce peak VRAM usage.
 # This lowers peak VRAM usage during residual analysis and evaluation,
