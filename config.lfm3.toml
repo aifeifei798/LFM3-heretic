@@ -1,0 +1,55 @@
+# Heretic configuration for the LFM3 family (LiquidAI).
+#
+# Usage:
+#   cp config.lfm3.toml config.toml      # in the directory you run Heretic from
+#   .venv/bin/heretic                    # or: .venv/bin/heretic --model <path>
+#
+# Supported checkpoints:
+#   LFM3-1.7B      text only                       (AutoModelForCausalLM)
+#   LFM3-VL-2B     image/video in, text out        (AutoModelForImageTextToText)
+#   LFM3-Omni-2B   image/video/audio in, text/speech out
+#   LFM3-Audio-2B  audio in, text/speech out       (AutoModelForMultimodalLM)
+#
+# All four share the same text decoder: 24 hybrid layers, 13 short-conv and 11
+# full/sliding attention. Abliteration therefore targets the same components in
+# every variant:
+#   * conv layers       -> layers.N.conv.out_proj       (attn.o_proj)
+#   * attention layers  -> layers.N.self_attn.o_proj    (attn.o_proj)
+#   * both              -> layers.N.feed_forward.w2     (mlp.down_proj)
+# The vision tower, audio encoder, and speech depth decoder are never modified.
+#
+# Omni and Audio implement their own generate() that rejects output_hidden_states,
+# output_logits and use_cache=False, and return a custom object instead of a tensor.
+# Heretic reads `sequences` from that object and falls back to a plain forward pass
+# for residual/logit analysis. Speech output is never requested: text responses are
+# sufficient for refusal and KL evaluation.
+#
+# Upstream checkpoints: https://huggingface.co/LiquidAI/LFM3-1.7B (and -VL/-Omni/-Audio)
+
+model = "/home/feifei/develop/models/LFM3-1.7B"
+
+# Local paths are trusted automatically. This is only needed for Hub IDs, where
+# Transformers would otherwise ask interactively before running the custom code.
+trust_remote_code = true
+
+# bfloat16 is what the checkpoints were trained in.
+dtypes = ["auto", "bfloat16"]
+
+# Small models: let Heretic pick the batch size.
+batch_size = 0
+max_batch_size = 64
+
+# The chat template opens every assistant turn with <think>, which the default
+# chain_of_thought_blocks setting already strips before scoring.
+
+modifiers = [
+    { plugin = "heretic.modifiers.ara.ARA" },
+]
+
+n_trials = 100
+n_startup_trials = 30
+
+# Save the merged model automatically once optimization finishes.
+model_action = "save"
+export_strategy = "merge"
+save_directory = "./LFM3-1.7B-heretic"

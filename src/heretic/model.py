@@ -15,6 +15,7 @@ from torch.utils.hooks import RemovableHandle
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForMultimodalLM,
     AutoProcessor,
     AutoTokenizer,
     BatchEncoding,
@@ -36,13 +37,23 @@ from .utils import Prompt, batchify, format_exception, print
 
 def get_model_class(
     model: str,
-) -> type[AutoModelForImageTextToText] | type[AutoModelForCausalLM]:
-    configs = PretrainedConfig.get_config_dict(model)
+) -> (
+    type[AutoModelForImageTextToText]
+    | type[AutoModelForMultimodalLM]
+    | type[AutoModelForCausalLM]
+):
+    config, _ = PretrainedConfig.get_config_dict(model)
+    auto_map = config.get("auto_map", {})
 
-    if any(("vision_config" in config) for config in configs):
+    # Image/video-text models (e.g. LFM3-VL and LFM3-Omni).
+    if "vision_config" in config or "AutoModelForImageTextToText" in auto_map:
         return AutoModelForImageTextToText
-    else:
-        return AutoModelForCausalLM
+
+    # Audio-text models without a vision tower (e.g. LFM3-Audio).
+    if "audio_config" in config or "AutoModelForMultimodalLM" in auto_map:
+        return AutoModelForMultimodalLM
+
+    return AutoModelForCausalLM
 
 
 def _collapse_flattened_residual_streams(
@@ -161,9 +172,10 @@ class Model:
             ),
         )
 
-        # Multimodal models have a processor we'll want to save.
+        # Multimodal models (image/video-text and audio-text) have a processor
+        # we'll want to save. Text-only models don't.
         self.processor = None
-        if get_model_class(settings.model) == AutoModelForImageTextToText:
+        if get_model_class(settings.model) != AutoModelForCausalLM:
             self.processor = AutoProcessor.from_pretrained(
                 settings.model,
                 **self.revision_kwargs,
@@ -578,11 +590,7 @@ class Model:
             result.append({"role": "user", "content": "\n\n".join(pending)})
         return result
 
-    def generate(
-        self,
-        prompts: list[Prompt],
-        **kwargs: Any,
-    ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
+    def _tokenize(self, prompts: list[Prompt]) -> BatchEncoding:
         chats = [
             self._apply_system_role(
                 [
@@ -613,12 +621,19 @@ class Model:
                 prompt + self.settings.response_prefix for prompt in chat_prompts
             ]
 
-        inputs = self.tokenizer(
+        return self.tokenizer(
             chat_prompts,
             return_tensors="pt",
             padding=True,
             return_token_type_ids=False,
         ).to(self.model.device)
+
+    def generate(
+        self,
+        prompts: list[Prompt],
+        **kwargs: Any,
+    ) -> tuple[BatchEncoding, Any]:
+        inputs = self._tokenize(prompts)
 
         # FIXME: The type checker has been disabled here because of the extremely complex
         #        interplay between different generate() signatures and dynamic delegation.
@@ -631,6 +646,18 @@ class Model:
 
         return inputs, outputs
 
+    def _forward_hidden_states(
+        self,
+        prompts: list[Prompt],
+    ) -> tuple[FloatTensor, ...]:
+        # Some models (e.g. LFM3-Audio and LFM3-Omni) implement their own generate()
+        # that rejects output_hidden_states and use_cache=False. A plain forward pass
+        # yields the same hidden states at the last prompt position, which is where
+        # the first generated token is predicted.
+        inputs = self._tokenize(prompts)
+        outputs = self.model(**inputs, output_hidden_states=True, use_cache=False)  # ty:ignore[call-non-callable]
+        return cast(tuple[FloatTensor, ...], outputs.hidden_states)
+
     def get_responses(
         self,
         prompts: list[Prompt],
@@ -641,11 +668,14 @@ class Model:
             max_new_tokens=self.settings.max_response_length,
         )
 
+        # Some models return a custom output object instead of a tensor.
+        sequences = outputs if isinstance(outputs, Tensor) else outputs.sequences
+
         return self.tokenizer.batch_decode(
             # Extract the newly generated part.
             # This cast is valid because the input_ids property is a Tensor
             # if the tokenizer is invoked with return_tensors="pt", as above.
-            outputs[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
+            sequences[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
             skip_special_tokens=skip_special_tokens,
         )
 
@@ -673,23 +703,28 @@ class Model:
     ) -> Tensor:
         # We only generate one token, and we return the residual vectors
         # at that token position, for each prompt and layer.
-        _, outputs = self.generate(
-            prompts,
-            max_new_tokens=1,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-            # KV cache is unnecessary here because we only need the hidden states
-            # for the first generated token.
-            use_cache=False,
-        )
+        try:
+            _, outputs = self.generate(
+                prompts,
+                max_new_tokens=1,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+                # KV cache is unnecessary here because we only need the hidden states
+                # for the first generated token.
+                use_cache=False,
+            )
 
-        # This cast is valid because GenerateDecoderOnlyOutput is the return type
-        # of model.generate with return_dict_in_generate=True.
-        outputs = cast(GenerateDecoderOnlyOutput, outputs)
+            # This cast is valid because GenerateDecoderOnlyOutput is the return type
+            # of model.generate with return_dict_in_generate=True.
+            outputs = cast(GenerateDecoderOnlyOutput, outputs)
 
-        # Hidden states for the first (only) generated token.
-        # This cast is valid because we passed output_hidden_states=True above.
-        hidden_states = cast(tuple[tuple[FloatTensor]], outputs.hidden_states)[0]
+            # Hidden states for the first (only) generated token.
+            # This cast is valid because we passed output_hidden_states=True above.
+            hidden_states = cast(tuple[tuple[FloatTensor]], outputs.hidden_states)[0]
+        except (TypeError, ValueError):
+            # Some models (e.g. LFM3-Audio and LFM3-Omni) implement their own
+            # generate() that rejects output_hidden_states and use_cache=False.
+            hidden_states = self._forward_hidden_states(prompts)
 
         # Models with Hyper-Connections (e.g. DeepSeek V4 and GLM 5.3) have several
         # residual streams, so their hidden states have shape
@@ -918,27 +953,34 @@ class Model:
     def get_logits(self, prompts: list[Prompt]) -> Tensor:
         # We only generate one token, and we return the raw logits over the vocabulary
         # at that token position, for each prompt.
-        _, outputs = self.generate(
-            prompts,
-            max_new_tokens=1,
-            output_logits=True,
-            return_dict_in_generate=True,
-            use_cache=False,
-        )
+        try:
+            _, outputs = self.generate(
+                prompts,
+                max_new_tokens=1,
+                output_logits=True,
+                return_dict_in_generate=True,
+                use_cache=False,
+            )
 
-        # This cast is valid because GenerateDecoderOnlyOutput is the return type
-        # of model.generate with return_dict_in_generate=True.
-        outputs = cast(GenerateDecoderOnlyOutput, outputs)
+            # This cast is valid because GenerateDecoderOnlyOutput is the return type
+            # of model.generate with return_dict_in_generate=True.
+            outputs = cast(GenerateDecoderOnlyOutput, outputs)
 
-        # Logits for the first (only) generated token.
-        # Use raw logits, not processed generation scores; processors can insert
-        # -inf for suppressed tokens, which can make KL divergence evaluate to NaN.
-        # This cast is valid because we passed output_logits=True above.
-        logits = cast(tuple[FloatTensor], outputs.logits)[0]
+            # Logits for the first (only) generated token.
+            # Use raw logits, not processed generation scores; processors can insert
+            # -inf for suppressed tokens, which can make KL divergence evaluate to NaN.
+            # This cast is valid because we passed output_logits=True above.
+            logits = cast(tuple[FloatTensor], outputs.logits)[0]
+            del outputs
+        except (TypeError, ValueError):
+            # See get_residuals: models with a custom generate() that rejects
+            # output_logits get the same next-token logits from a forward pass.
+            inputs = self._tokenize(prompts)
+            logits = self.model(**inputs, use_cache=False).logits[:, -1, :]  # ty:ignore[call-non-callable]
+            del inputs
 
         # The returned tensor has shape (prompt, token).
         if self.settings.offload_outputs_to_cpu:
-            del outputs
             logits = logits.cpu()
             empty_cache()
 
@@ -988,12 +1030,15 @@ class Model:
             max_new_tokens=4096,
         )  # ty:ignore[call-non-callable]
 
+        # Some models return a custom output object instead of a tensor.
+        sequences = outputs if isinstance(outputs, Tensor) else outputs.sequences
+
         # This cast is valid because str is the return type
         # when passing a sequence of token IDs.
         return cast(
             str,
             self.tokenizer.decode(
-                outputs[0, inputs["input_ids"].shape[1] :],
+                sequences[0, inputs["input_ids"].shape[1] :],
                 skip_special_tokens=True,
             ),
         )
