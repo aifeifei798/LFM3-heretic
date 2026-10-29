@@ -1,8 +1,12 @@
-# Heretic configuration for the local LFM3-VL-2B checkpoint.
+# Heretic configuration for LFM3-VL-2B.
 #
 # Usage:
 #   cp config.lfm3-vl.toml config.toml      # in the directory you run Heretic from
 #   .venv/bin/heretic                       # or: .venv/bin/heretic --model <path>
+#
+# Upstream checkpoint: https://huggingface.co/LiquidAI/LFM3-VL-2B
+# Loading by Hub ID also works; just expect the usual custom-code prompt unless
+# trust_remote_code = true is set below.
 #
 # LFM3-VL is a hybrid architecture (short-conv blocks + full/sliding attention)
 # that is not natively supported by Transformers, so its own modeling code must
@@ -10,8 +14,9 @@
 
 model = "/home/feifei/develop/models/LFM3-VL-2B"
 
-# Required: without this, Transformers stops and asks interactively whether to
-# run the custom code shipped with the checkpoint.
+# Local paths are trusted automatically, so this line is only needed if you
+# switch to a Hub ID above or want to be explicit. Set it to false to see the
+# Transformers prompt instead.
 trust_remote_code = true
 
 # bfloat16 is what the checkpoint was trained in; no need to try anything else.

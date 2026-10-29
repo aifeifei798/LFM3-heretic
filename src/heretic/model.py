@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TypeAlias, cast
 
 import torch
@@ -127,12 +128,23 @@ class Model:
             self.revision_kwargs["revision"] = settings.model_commit
 
         # Some architectures (e.g. LFM3-VL) are not natively supported by
-        # Transformers and ship their own modeling code. Executing that code
-        # requires explicit approval, which is requested interactively by
-        # Transformers unless the trust_remote_code setting is enabled.
-        self.trusted_models = {settings.model} if settings.trust_remote_code else set()
+        # Transformers and ship their own modeling code, without which the
+        # model cannot be loaded at all. Running that code requires approval,
+        # which Transformers otherwise requests interactively (once each for
+        # the tokenizer, the processor, and the model).
+        #
+        # If the trust_remote_code setting is unset, code from a local model
+        # directory is trusted, because the files were deliberately obtained
+        # beforehand, while models loaded from the Hugging Face Hub still
+        # prompt. Set the setting to force either behavior.
+        if settings.trust_remote_code is None:
+            trust_remote_code = Path(settings.model).exists()
+        else:
+            trust_remote_code = settings.trust_remote_code
+
+        self.trusted_models = {settings.model} if trust_remote_code else set()
         self.trust_kwargs: dict[str, Any] = (
-            {"trust_remote_code": True} if self.trusted_models else {}
+            {"trust_remote_code": True} if trust_remote_code else {}
         )
 
         print()

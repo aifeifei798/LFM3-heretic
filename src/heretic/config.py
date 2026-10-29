@@ -198,13 +198,14 @@ class Settings(BaseSettings):
         description="Hugging Face commit hash of the model.",
     )
 
-    trust_remote_code: bool = Field(
-        default=False,
+    trust_remote_code: bool | None = Field(
+        default=None,
         description=(
-            "Whether to execute custom model code. Required for models whose architecture "
-            "is not natively supported by Transformers (e.g. LFM3-VL), which ship their "
-            "own modeling files. Equivalent to answering the interactive prompt that "
-            "Transformers shows otherwise, but keeps runs non-interactive and reproducible."
+            "Whether to execute custom model code. Models whose architecture is not "
+            "natively supported by Transformers (e.g. LFM3-VL) ship their own modeling "
+            "files that must be run in order to load them. If unset, code from a local "
+            "model directory is trusted, and Transformers asks interactively for models "
+            "loaded from the Hugging Face Hub."
         ),
     )
 

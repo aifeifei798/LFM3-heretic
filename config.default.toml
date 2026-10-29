@@ -27,11 +27,12 @@ device_map = "auto"
 # Maximum memory to allocate per device.
 # max_memory = { "0" = "20GB", "cpu" = "64GB" }
 
-# Whether to execute custom model code. Required for models whose architecture
-# is not natively supported by Transformers and which therefore ship their own
-# modeling files (e.g. LFM3-VL). When disabled, Transformers asks interactively
-# before running such code; enabling this keeps runs non-interactive.
-trust_remote_code = false
+# Whether to execute custom model code. Models whose architecture is not natively
+# supported by Transformers (e.g. LFM3-VL) ship their own modeling files, without
+# which they cannot be loaded at all. If unset (the default), code from a local
+# model directory is trusted, while Transformers asks interactively for models
+# loaded from the Hugging Face Hub.
+# trust_remote_code = true
 
 # Whether to move intermediate analysis tensors (such as residuals and logprobs)
 # to CPU memory as soon as possible to reduce peak VRAM usage.
