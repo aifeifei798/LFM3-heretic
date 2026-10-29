@@ -13,6 +13,7 @@ from torch import FloatTensor, LongTensor, Tensor
 from torch.nn import Module, ModuleList
 from torch.utils.hooks import RemovableHandle
 from transformers import (
+    AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForMultimodalLM,
@@ -26,6 +27,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     ProcessorMixin,
     TextStreamer,
+    integrations,
 )
 from transformers.generation import (
     GenerateDecoderOnlyOutput,
@@ -39,7 +41,8 @@ from .utils import Prompt, batchify, format_exception, print
 def get_model_class(
     model: str,
 ) -> (
-    type[AutoModelForImageTextToText]
+    type[AutoModel]
+    | type[AutoModelForImageTextToText]
     | type[AutoModelForMultimodalLM]
     | type[AutoModelForCausalLM]
 ):
@@ -48,13 +51,70 @@ def get_model_class(
 
     # Image/video-text models (e.g. LFM3-VL and LFM3-Omni).
     if "vision_config" in config or "AutoModelForImageTextToText" in auto_map:
-        return AutoModelForImageTextToText
+        model_class = AutoModelForImageTextToText
 
     # Audio-text models without a vision tower (e.g. LFM3-Audio).
-    if "audio_config" in config or "AutoModelForMultimodalLM" in auto_map:
-        return AutoModelForMultimodalLM
+    elif "audio_config" in config or "AutoModelForMultimodalLM" in auto_map:
+        model_class = AutoModelForMultimodalLM
 
-    return AutoModelForCausalLM
+    else:
+        model_class = AutoModelForCausalLM
+
+    # Some custom-code checkpoints (e.g. the D1 family) register only "AutoModel"
+    # in their auto_map, because their class doesn't fit the standard task
+    # classes. Loading them through the task class fails with "Unrecognized
+    # configuration class"; AutoModel loads them through their own code.
+    if auto_map and "AutoModel" in auto_map and model_class.__name__ not in auto_map:
+        return AutoModel
+
+    return model_class
+
+
+def _tolerate_unregistered_kernel_funcs() -> None:
+    """
+    Lets models load whose vendored modeling code comes from a Transformers
+    version newer than the installed one.
+
+    Transformers main decorates classes with `@use_kernelized_func(<plain
+    function>)`, which the kernels library only accepts for functions registered
+    through `@use_kernel_forward_from_hub`. Transformers releases delegate to that
+    strict check verbatim, so importing such modeling code fails outright.
+    Replace the integration with a version that falls back to the plain PyTorch
+    implementation (which is exactly what Transformers does when hub kernels are
+    disabled) instead of failing the entire model load. Properly registered
+    kernel functions are unaffected.
+    """
+    real_use_kernelized_func = getattr(integrations, "use_kernelized_func", None)
+    if real_use_kernelized_func is None:
+        return
+
+    def use_kernelized_func_with_fallback(
+        module_names: list[Callable] | Callable,
+    ) -> Callable[[type], type]:
+        try:
+            decorator = real_use_kernelized_func(module_names)
+        except ValueError:
+            return lambda cls: cls
+
+        def applying_decorator(cls: type) -> type:
+            try:
+                return decorator(cls)
+            except ValueError:
+                print(
+                    f"[yellow]Falling back to the PyTorch implementation of "
+                    f"[bold]{cls.__name__}[/] (its hub kernel is not registered).[/]"
+                )
+                return cls
+
+        return applying_decorator
+
+    # Replacing a library attribute with a wrapper of the same call signature;
+    # ty can't verify the declared types across the monkeypatch.
+    integrations.use_kernelized_func = use_kernelized_func_with_fallback  # ty:ignore[invalid-assignment]
+
+
+with suppress(Exception):
+    _tolerate_unregistered_kernel_funcs()
 
 
 def _collapse_flattened_residual_streams(
