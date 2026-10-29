@@ -2,13 +2,13 @@
 #
 # Usage:
 #   cp config.lfm3.toml config.toml      # in the directory you run Heretic from
-#   .venv/bin/heretic                    # or: .venv/bin/heretic --model <path>
+#   .venv/bin/heretic                    # or: .venv/bin/heretic --model <id-or-path>
 #
-# Supported checkpoints:
-#   LFM3-1.7B      text only                       (AutoModelForCausalLM)
-#   LFM3-VL-2B     image/video in, text out        (AutoModelForImageTextToText)
-#   LFM3-Omni-2B   image/video/audio in, text/speech out
-#   LFM3-Audio-2B  audio in, text/speech out       (AutoModelForMultimodalLM)
+# Supported checkpoints (pick one for `model` below):
+#   LiquidAI/LFM3-1.7B      text only                       (AutoModelForCausalLM)
+#   LiquidAI/LFM3-VL-2B     image/video in, text out        (AutoModelForImageTextToText)
+#   LiquidAI/LFM3-Omni-2B   image/video/audio in, text/speech out
+#   LiquidAI/LFM3-Audio-2B  audio in, text/speech out       (AutoModelForMultimodalLM)
 #
 # All four share the same text decoder: 24 hybrid layers, 13 short-conv and 11
 # full/sliding attention. Abliteration therefore targets the same components in
@@ -23,13 +23,15 @@
 # Heretic reads `sequences` from that object and falls back to a plain forward pass
 # for residual/logit analysis. Speech output is never requested: text responses are
 # sufficient for refusal and KL evaluation.
-#
-# Upstream checkpoints: https://huggingface.co/LiquidAI/LFM3-1.7B (and -VL/-Omni/-Audio)
 
-model = "/home/feifei/develop/models/LFM3-1.7B"
+# Hugging Face model ID, or a path to a local checkpoint directory.
+model = "LiquidAI/LFM3-1.7B"
+# model = "/path/to/LFM3-1.7B"
 
-# Local paths are trusted automatically. This is only needed for Hub IDs, where
-# Transformers would otherwise ask interactively before running the custom code.
+# LFM3 is not natively supported by Transformers, so the checkpoint's own modeling
+# code must run. Required for Hub IDs; local paths are trusted automatically, so
+# this line is only there to make the intent explicit (and to avoid the prompt when
+# loading by ID).
 trust_remote_code = true
 
 # bfloat16 is what the checkpoints were trained in.
