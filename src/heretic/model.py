@@ -20,6 +20,7 @@ from transformers import (
     AutoTokenizer,
     BatchEncoding,
     BitsAndBytesConfig,
+    GenerationConfig,
     PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -111,6 +112,61 @@ def chat_template_supports_system_role(tokenizer: PreTrainedTokenizerBase) -> bo
     except Exception:
         return False
     return sentinel in rendered
+
+
+def sanitize_generation_config(generation_config: GenerationConfig) -> list[str]:
+    """
+    Makes a generation config pass Transformers' strict save-time validation.
+
+    Transformers 5 refuses to save generation configs that set flags belonging to a
+    generation mode the config doesn't select, such as sampling parameters next to
+    `do_sample: false` (the LiquidAI LFM3-Audio/Omni checkpoints ship like this,
+    which made exporting merged models from them fail). Since such flags have no
+    effect in the selected mode, removing them doesn't change generation behavior.
+
+    Returns the names of the removed flags, or an empty list if the config was
+    valid and therefore left untouched.
+    """
+
+    try:
+        generation_config.validate(strict=True)
+        return []
+    except ValueError:
+        pass
+
+    # Flags that only take effect in the given generation mode.
+    sampling_only_flags = [
+        "temperature",
+        "top_p",
+        "min_p",
+        "top_h",
+        "typical_p",
+        "top_k",
+        "epsilon_cutoff",
+        "eta_cutoff",
+    ]
+    beam_only_flags = [
+        "early_stopping",
+        "length_penalty",
+    ]
+
+    removable_flags: list[str] = []
+    if generation_config.do_sample is not True:
+        removable_flags.extend(sampling_only_flags)
+    if generation_config.num_beams in (None, 1):
+        removable_flags.extend(beam_only_flags)
+
+    # Reset the offending flags to their default ("unset") values.
+    defaults = GenerationConfig()
+    removed_flags = [
+        flag
+        for flag in removable_flags
+        if getattr(generation_config, flag, None) != getattr(defaults, flag, None)
+    ]
+    for flag in removed_flags:
+        setattr(generation_config, flag, getattr(defaults, flag, None))
+
+    return removed_flags
 
 
 # The list contains one element per layer.
@@ -392,7 +448,6 @@ class Model:
             # Merge and unload
             print("* Merging LoRA adapters into base model...")
             merged_model = peft_model.merge_and_unload()
-            return merged_model
         else:
             # Non-quantized model - can merge directly
             print("* Merging LoRA adapters into base model...")
@@ -400,7 +455,19 @@ class Model:
             # merge_and_unload() modifies self.model in-place, destroying LoRA adapters.
             # Mark for full reload if user switches trials later.
             self.needs_reload = True
-            return merged_model
+
+        # The merged model inherits the base checkpoint's generation config, which
+        # may fail Transformers' strict save-time validation (see the docstring of
+        # sanitize_generation_config for details).
+        if merged_model.generation_config is not None:
+            removed_flags = sanitize_generation_config(merged_model.generation_config)
+            if removed_flags:
+                print(
+                    f"* Removed [bold]{', '.join(removed_flags)}[/] from the generation "
+                    "config. These flags have no effect in the generation mode the config "
+                    "selects, and Transformers refuses to save configs that set them."
+                )
+        return merged_model
 
     def reset_model(self) -> bool:
         """
