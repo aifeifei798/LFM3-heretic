@@ -2,17 +2,21 @@
 # Copyright (C) 2025-2026  Philipp Emanuel Weidmann <pew@worldwidemann.com> + contributors
 
 import json
+import re
 import tempfile
 import unittest
 
 import torch.nn
 import transformers.integrations
+from transformers.core_model_loading import WeightRenaming
 
 from heretic.model import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForMultimodalLM,
+    _make_dollar_safe_process_source_pattern,
+    _make_dollar_safe_process_target_pattern,
     get_model_class,
 )
 
@@ -114,6 +118,63 @@ class TolerantUseKernelizedFuncTests(unittest.TestCase):
         decorated = decorator(Layer)
         layer = decorated()
         self.assertTrue(hasattr(layer, "_kernel_funcs"))
+
+
+# Stand-ins for `process_target_pattern` / `process_source_pattern` as they behave
+# in 5.21.0+ (the `$`-anchor handling was dropped) and in 5.18.0-5.20.0 (reference).
+def fake_521_process_target_pattern(pattern: str) -> tuple[str, str | None]:
+    processed = pattern.removeprefix("^")
+    processed = re.sub(r"\(\?.+?\)?\)", "", processed)
+    processed = processed.replace(r"\.", ".")
+    capturing_group_match = re.search(r"\(.+?\)", processed)
+    return processed, capturing_group_match.group(0) if capturing_group_match else None
+
+
+def fake_518_process_target_pattern(pattern: str) -> tuple[str, str | None]:
+    processed, captured_group = fake_521_process_target_pattern(pattern)
+    return processed.removesuffix("$"), captured_group
+
+
+def fake_521_process_source_pattern(source_pattern: str, target_pattern: str) -> str:
+    if target_pattern.startswith("^") and not source_pattern.startswith("^"):
+        source_pattern = f"^{source_pattern}"
+    return source_pattern
+
+
+def fake_518_process_source_pattern(source_pattern: str, target_pattern: str) -> str:
+    source_pattern = fake_521_process_source_pattern(source_pattern, target_pattern)
+    if target_pattern.endswith("$") and not source_pattern.endswith("$"):
+        source_pattern = f"{source_pattern}$"
+    return source_pattern
+
+
+class DollarSafeReverseRenamingPatchTests(unittest.TestCase):
+    def test_target_wrapper_strips_leaked_dollar(self) -> None:
+        wrapper = _make_dollar_safe_process_target_pattern(fake_521_process_target_pattern)
+        self.assertEqual(wrapper("^mask_embedding$"), ("mask_embedding", None))
+
+    def test_target_wrapper_idempotent_on_fixed_version(self) -> None:
+        wrapper = _make_dollar_safe_process_target_pattern(fake_518_process_target_pattern)
+        self.assertEqual(wrapper("^mask_embedding$"), ("mask_embedding", None))
+
+    def test_source_wrapper_restores_end_anchor(self) -> None:
+        wrapper = _make_dollar_safe_process_source_pattern(fake_521_process_source_pattern)
+        self.assertEqual(wrapper("model.probe", "^probe$"), "^model.probe$")
+
+    def test_source_wrapper_idempotent_on_fixed_version(self) -> None:
+        wrapper = _make_dollar_safe_process_source_pattern(fake_518_process_source_pattern)
+        self.assertEqual(wrapper("model.probe", "^probe$"), "^model.probe$")
+
+    def test_real_reverse_rename_round_trip(self) -> None:
+        # The contract through the real (patched at heretic.model import time)
+        # transformers functions, for the rule that exposed the bug.
+        transform = WeightRenaming(
+            source_patterns=r"^mask_embedding$", target_patterns="model.depth_decoder.mask_embedding"
+        )
+        renamed_key, _ = transform.reverse_transform().rename_source_key(
+            "model.depth_decoder.mask_embedding"
+        )
+        self.assertEqual(renamed_key, "mask_embedding")
 
 
 if __name__ == "__main__":

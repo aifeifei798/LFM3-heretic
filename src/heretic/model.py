@@ -27,6 +27,7 @@ from transformers import (
     PreTrainedTokenizerBase,
     ProcessorMixin,
     TextStreamer,
+    core_model_loading,
     integrations,
 )
 from transformers.generation import (
@@ -115,6 +116,60 @@ def _tolerate_unregistered_kernel_funcs() -> None:
 
 with suppress(Exception):
     _tolerate_unregistered_kernel_funcs()
+
+
+def _make_dollar_safe_process_target_pattern(original: Callable) -> Callable:
+    # 5.18.0 reference behavior: the reverse replacement must not carry the end anchor.
+    def dollar_safe_process_target_pattern(pattern: str) -> tuple[str, str | None]:
+        processed_pattern, captured_group = original(pattern)
+        return processed_pattern.removesuffix("$"), captured_group
+
+    return dollar_safe_process_target_pattern
+
+
+def _make_dollar_safe_process_source_pattern(original: Callable) -> Callable:
+    def dollar_safe_process_source_pattern(source_pattern: str, target_pattern: str) -> str:
+        processed_pattern = original(source_pattern, target_pattern)
+        if target_pattern.endswith("$") and not processed_pattern.endswith("$"):
+            processed_pattern = f"{processed_pattern}$"
+        return processed_pattern
+
+    return dollar_safe_process_source_pattern
+
+
+def _restore_dollar_stripping_in_reverse_renaming() -> None:
+    """
+    Lets models whose conversion mappings use end-anchored `WeightRenaming` rules
+    round-trip through `save_pretrained`.
+
+    5.21.0 dropped the `$`-anchor handling from `process_target_pattern()` and
+    `process_source_pattern()`: the reverse mapping then writes the anchor into
+    the saved key (e.g. `mask_embedding$`), which matches neither the forward
+    rule nor any parameter path, so reloading the checkpoint silently leaves
+    that weight randomly initialized (huggingface/transformers#50177). Wrap both
+    functions with the 5.18.0-5.20.0 behavior; healthy versions are detected by
+    probing and left untouched.
+    """
+    probe_target, _ = core_model_loading.process_target_pattern("^probe$")
+    probe_source = core_model_loading.process_source_pattern("model.probe", "^probe$")
+    if "$" not in probe_target and probe_source.endswith("$"):
+        return
+
+    # Same monkeypatch typing limitation as the use_kernelized_func patch above.
+    core_model_loading.process_target_pattern = _make_dollar_safe_process_target_pattern(  # ty:ignore[invalid-assignment]
+        core_model_loading.process_target_pattern
+    )
+    core_model_loading.process_source_pattern = _make_dollar_safe_process_source_pattern(  # ty:ignore[invalid-assignment]
+        core_model_loading.process_source_pattern
+    )
+    print(
+        "[yellow]Patched the transformers checkpoint reverse mapping to strip `$` anchors "
+        "(regressed in 5.21.0, see huggingface/transformers#50177).[/]"
+    )
+
+
+with suppress(Exception):
+    _restore_dollar_stripping_in_reverse_renaming()
 
 
 def _collapse_flattened_residual_streams(
