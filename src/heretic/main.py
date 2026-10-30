@@ -636,6 +636,14 @@ def run():
         print()
         print(f"Loading model [bold]{settings.evaluate_model}[/]...")
         settings.model = settings.evaluate_model
+        # The evaluated model gets reloaded below, which checks trusted_models.
+        # Apply the same trust policy as Model.__init__ (the default trusts local
+        # paths, since the files were deliberately obtained beforehand), otherwise
+        # models with custom code can never be evaluated.
+        if settings.trust_remote_code is True or (
+            settings.trust_remote_code is None and Path(settings.evaluate_model).exists()
+        ):
+            model.trusted_models.add(settings.evaluate_model)
         model.reset_model()
         print("* Evaluating...")
         for name, score in evaluator.get_scores():
